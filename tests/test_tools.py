@@ -41,6 +41,13 @@ def test_glob(tmp_path):
     assert "src/a.py" in out and "src/b.py" in out
     assert "README.md" not in out
 
+def test_list_files_shows_file_sizes(tmp_path):
+    tb, _, _ = _tb(tmp_path)
+    out = tb.call("list_files", {})
+    assert "src/" in out
+    assert "README.md (" in out
+    assert "B)" in out
+
 
 def test_edit_replaces_and_reports(tmp_path):
     tb, wd, _ = _tb(tmp_path)
