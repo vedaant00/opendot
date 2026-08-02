@@ -156,3 +156,29 @@ def test_read_file_directory_returns_clear_error(tmp_path):
     assert "is a directory" in out
     assert "list_files" in out
     assert "IsADirectoryError" not in out
+
+
+def test_max_tool_output_default(monkeypatch):
+    monkeypatch.delenv("OPENDOT_MAX_TOOL_OUTPUT", raising=False)
+    from opendot.tools.local import _DEFAULT_MAX_OUTPUT, _resolve_max_output
+
+    assert _resolve_max_output() == _DEFAULT_MAX_OUTPUT == 30_000
+
+
+def test_max_tool_output_env_override(monkeypatch):
+    monkeypatch.setenv("OPENDOT_MAX_TOOL_OUTPUT", "100")
+    from opendot.tools.local import _resolve_max_output, _truncate
+
+    assert _resolve_max_output() == 100
+    out = _truncate("x" * 150)
+    assert out.startswith("x" * 100)
+    assert "truncated" in out
+    assert "150 chars total" in out
+
+
+def test_max_tool_output_invalid_env_falls_back(monkeypatch):
+    monkeypatch.setenv("OPENDOT_MAX_TOOL_OUTPUT", "not-an-int")
+    from opendot.tools.local import _DEFAULT_MAX_OUTPUT, _resolve_max_output
+
+    assert _resolve_max_output() == _DEFAULT_MAX_OUTPUT
+

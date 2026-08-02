@@ -206,6 +206,10 @@ run in your own shell outside opendot is never snapshotted or logged either way.
 To exclude paths from snapshotting permanently, use the `skip:` rule in
 `OPENDOT.md`.
 
+**Tool output size.** Each tool result is capped so a huge file can't blow the
+model context. Override the default (30000 characters) with
+`OPENDOT_MAX_TOOL_OUTPUT` (non-integer values are ignored and the default is kept).
+
 ## Contributing
 
 Issues and PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for setup and

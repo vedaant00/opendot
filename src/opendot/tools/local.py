@@ -16,7 +16,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-_MAX_OUTPUT = 30_000  # cap tool output so one huge file can't blow the context
+_DEFAULT_MAX_OUTPUT = 30_000
+
+
+def _resolve_max_output() -> int:
+    """Read ``OPENDOT_MAX_TOOL_OUTPUT``, falling back to 30000 on unset/invalid."""
+    raw = os.environ.get("OPENDOT_MAX_TOOL_OUTPUT", str(_DEFAULT_MAX_OUTPUT))
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_MAX_OUTPUT
+
+
+_MAX_OUTPUT = _resolve_max_output()  # cap tool output so one huge file can't blow the context
 
 
 def _unified_diff(old: str, new: str, path: str, max_lines: int = 200) -> str:
@@ -42,8 +54,9 @@ def _unified_diff(old: str, new: str, path: str, max_lines: int = 200) -> str:
 
 
 def _truncate(text: str) -> str:
-    if len(text) > _MAX_OUTPUT:
-        return text[:_MAX_OUTPUT] + f"\n... [truncated, {len(text)} chars total]"
+    limit = _resolve_max_output()
+    if len(text) > limit:
+        return text[:limit] + f"\n... [truncated, {len(text)} chars total]"
     return text
 
 
