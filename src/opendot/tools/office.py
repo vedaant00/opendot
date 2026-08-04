@@ -64,6 +64,8 @@ def build_office_tools(box) -> list:
             return f"error: file not found: {p}"
         wb = openpyxl.load_workbook(p, data_only=True)
         names = wb.sheetnames
+        if sheet and sheet not in names:
+            return f"error: no sheet {sheet!r}; sheets: {', '.join(names)}"
         ws = wb[sheet] if sheet else wb[names[0]]
         lines = [
             f"workbook {box._rel(p)}  sheets: {', '.join(names)}",
@@ -84,7 +86,10 @@ def build_office_tools(box) -> list:
         if not p.exists():
             return f"error: file not found: {p}"
         wb = openpyxl.load_workbook(p)
-        ws = wb[sheet] if sheet else wb[wb.sheetnames[0]]
+        names = wb.sheetnames
+        if sheet and sheet not in names:
+            return f"error: no sheet {sheet!r}; sheets: {', '.join(names)}"
+        ws = wb[sheet] if sheet else wb[names[0]]
         old = ws[cell].value
         if not _snapshot(p):
             return "skipped: user declined an edit outside the workspace"

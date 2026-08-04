@@ -102,6 +102,27 @@ def test_read_and_edit_xlsx(tmp_path):
     assert wb.active["B2"].value == 120  # coerced to int
 
 
+def test_xlsx_missing_sheet_lists_available_sheets(tmp_path):
+    tb, wd, rev = _tb(tmp_path)
+    path = wd / "data.xlsx"
+    _make_xlsx(path)
+
+    read_result = tb.call("read_xlsx", {"path": "data.xlsx", "sheet": "Data"})
+    edit_result = tb.call(
+        "edit_cell",
+        {"path": "data.xlsx", "cell": "B2", "value": "120", "sheet": "Data"},
+    )
+
+    expected = "error: no sheet 'Data'; sheets: Sheet"
+    assert read_result == expected
+    assert edit_result == expected
+    assert rev.history() == []
+
+    import openpyxl
+
+    assert openpyxl.load_workbook(path).active["B2"].value == 100
+
+
 def test_xlsx_edit_is_undoable(tmp_path):
     tb, wd, rev = _tb(tmp_path)
     _make_xlsx(wd / "data.xlsx")
