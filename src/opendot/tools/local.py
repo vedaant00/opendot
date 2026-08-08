@@ -361,11 +361,19 @@ class Toolbox:
             path: str = ".",
             max_matches: int = 100,
             ignore_case: bool = False,
+            context: int = 0,
         ) -> str:
-            """Search file contents for a regex, returning path:line:text matches."""
+            """Search file contents for a regex, returning path:line:text matches.
+
+            When ``context`` > 0, also include that many lines before and after each
+            match. Context lines use ``path:line-text`` (dash) while matched lines
+            keep ``path:line:text`` (colon).
+            """
             import re
 
             base = self._resolve(path)
+            if context < 0:
+                return "error: context must be a non-negative integer"
             try:
                 rx = re.compile(
                     pattern,
@@ -377,18 +385,25 @@ class Toolbox:
             roots = [base] if base.is_file() else self._walk_files(base)
             for f in roots:
                 try:
-                    for i, line in enumerate(
-                        f.read_text(encoding="utf-8", errors="ignore").splitlines(), 1
-                    ):
-                        if rx.search(line):
-                            rel = self._rel(f)
-                            hits.append(f"{rel}:{i}:{line.strip()[:200]}")
-                            if len(hits) >= max_matches:
-                                return _truncate(
-                                    "\n".join(hits) + f"\n... (capped at {max_matches})"
-                                )
+                    lines = f.read_text(encoding="utf-8", errors="ignore").splitlines()
                 except OSError:
                     continue
+                match_count = 0
+                for i, line in enumerate(lines, 1):
+                    if not rx.search(line):
+                        continue
+                    match_count += 1
+                    rel = self._rel(f)
+                    first = max(1, i - context)
+                    last = min(len(lines), i + context)
+                    for j in range(first, last + 1):
+                        text = lines[j - 1].strip()[:200]
+                        marker = ":" if j == i else "-"
+                        hits.append(f"{rel}:{j}{marker}{text}")
+                    if match_count >= max_matches:
+                        return _truncate(
+                            "\n".join(hits) + f"\n... (capped at {max_matches})"
+                        )
             return _truncate("\n".join(hits)) if hits else "no matches"
 
         def glob(pattern: str) -> str:
@@ -530,6 +545,10 @@ class Toolbox:
                         "ignore_case": {
                             "type": "boolean",
                             "description": "Case-insensitive search (default false).",
+                        },
+                        "context": {
+                            "type": "integer",
+                            "description": "Lines of context before and after each match (default 0).",
                         },
                     },
                     "required": ["pattern"],
