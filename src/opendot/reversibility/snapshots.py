@@ -547,7 +547,7 @@ def restore_snapshot(snap: Snapshot, rules: IgnoreRules | None = None) -> list[s
         p = Path(dirpath)
         if p == wd:
             continue
-        if rules.skipped(p.name):
+        if any(rules.skipped(part) for part in p.relative_to(wd).parts):
             continue
         try:
             if not any(p.iterdir()):
