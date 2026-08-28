@@ -40,11 +40,11 @@ async def test_explorers_run_parallel_readonly_and_return_findings(tmp_path, mon
 
     # Replace the real Agent with a fake read-only agent that "explores".
     class FakeAgent:
-        def __init__(self, config=None, confirm=None):
+        def __init__(self, config=None, confirm=None, read_only=False):
             self.config = config
             from opendot.tools.local import Toolbox
 
-            self.toolbox = Toolbox(config.workdir, read_only=True)
+            self.toolbox = Toolbox(config.workdir, read_only=read_only)
 
         async def run(self, task):
             order.append(f"start:{task}")

@@ -416,3 +416,58 @@ def test_session_summary_counts_only_this_session(tmp_path):
     assert s["irreversible"] == 1
     assert s["cost_usd"] == 0.05
     assert s["total_tokens"] == 2000
+
+
+# -- issue #139: explorer subagents must not be able to spawn explorers --
+
+
+def _run_and_capture_tools(a: Agent, monkeypatch) -> list[dict]:
+    """Run one turn with `_dispatch_turn` faked out (no real model call), and
+    return the `tools` list `run()` actually handed to the dispatch path —
+    the same list a live model call would have seen."""
+    captured: dict[str, list[dict]] = {}
+
+    async def fake_dispatch_turn(litellm, tools):
+        captured["tools"] = tools
+        yield _Assembled({"role": "assistant", "content": "done"}, [])
+
+    monkeypatch.setattr(a, "_dispatch_turn", fake_dispatch_turn)
+
+    async def run():
+        async for _ in a.run("hi"):
+            pass
+
+    asyncio.run(run())
+    return captured["tools"]
+
+
+def test_normal_agent_toolbox_is_not_read_only(tmp_path):
+    a = Agent(AgentConfig(model="m", workdir=str(tmp_path)))
+    assert a.toolbox.read_only is False
+
+
+def test_normal_agent_has_explorers_enabled(tmp_path):
+    a = Agent(AgentConfig(model="m", workdir=str(tmp_path)))
+    assert a.explorers_enabled is True
+
+
+def test_read_only_agent_toolbox_is_read_only(tmp_path):
+    a = Agent(AgentConfig(model="m", workdir=str(tmp_path)), read_only=True)
+    assert a.toolbox.read_only is True
+
+
+def test_read_only_agent_has_explorers_disabled(tmp_path):
+    a = Agent(AgentConfig(model="m", workdir=str(tmp_path)), read_only=True)
+    assert a.explorers_enabled is False
+
+
+def test_read_only_agent_run_does_not_pass_spawn_explorers(tmp_path, monkeypatch):
+    a = Agent(AgentConfig(model="m", workdir=str(tmp_path)), read_only=True)
+    tools = _run_and_capture_tools(a, monkeypatch)
+    assert not any(t["function"]["name"] == "spawn_explorers" for t in tools)
+
+
+def test_normal_agent_run_passes_spawn_explorers(tmp_path, monkeypatch):
+    a = Agent(AgentConfig(model="m", workdir=str(tmp_path)))
+    tools = _run_and_capture_tools(a, monkeypatch)
+    assert any(t["function"]["name"] == "spawn_explorers" for t in tools)

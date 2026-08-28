@@ -64,12 +64,9 @@ async def run_explorers(
                 system_prompt=_EXPLORER_SYSTEM,
                 api_base=api_base,
                 temperature=temperature,
-            )
+            ),
+            read_only=True,
         )
-        # Force a read-only toolbox regardless of defaults.
-        from opendot.tools.local import Toolbox
-
-        agent.toolbox = Toolbox(workdir, reversibility=None, read_only=True)
         answer_parts: list[str] = []
         try:
             async for ev in agent.run(task):

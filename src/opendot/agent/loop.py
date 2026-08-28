@@ -79,7 +79,13 @@ def _assistant_msg(content: str, calls: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 class Agent:
-    def __init__(self, config: AgentConfig | None = None, confirm=None, mcp_manager=None) -> None:
+    def __init__(
+        self,
+        config: AgentConfig | None = None,
+        confirm=None,
+        mcp_manager=None,
+        read_only: bool = False,
+    ) -> None:
         self.config = config or AgentConfig()
         self.mcp = mcp_manager
 
@@ -105,10 +111,13 @@ class Agent:
             model=self.config.model,
             params=params,
         )
+        # Explorer toolboxes are read-only and previously used reversibility=None.
+        # Preserve that behavior while constructing the correct toolbox up front.
         self.toolbox = Toolbox(
             self.config.workdir,
-            reversibility=self.reversibility,
+            reversibility=None if read_only else self.reversibility,
             confirm=confirm,
+            read_only=read_only,
             mcp_manager=mcp_manager,
         )
         system = self.config.system_prompt or DEFAULT_SYSTEM_PROMPT
