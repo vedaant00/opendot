@@ -25,10 +25,31 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Footer, Header, Input, Static
 
 from opendot.agent.loop import Agent
+from opendot.reversibility.ledger import LedgerEntry
 from opendot.tui.commands import SLASH_COMMANDS
 from opendot.tui.helpers import _LOGO_PATH, _render_tool_result, _row_bar
 from opendot.tui.modals import ApiKeyModal, ConfirmModal, McpAddModal, SearchListModal
 from opendot.tui.sidebar import Sidebar
+
+
+def _resolve_action_id(entries: list[LedgerEntry], snap_id: str) -> LedgerEntry | None:
+    """Resolve a displayed action ID without relying on a fixed-width suffix."""
+    target = next((entry for entry in entries if entry.id == snap_id), None)
+    if target is not None:
+        return target
+
+    try:
+        numeric_id = int(snap_id)
+    except (TypeError, ValueError):
+        return None
+
+    for entry in entries:
+        try:
+            if int(entry.id) == numeric_id:
+                return entry
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 class OpendotTUI(App):
@@ -847,7 +868,7 @@ class OpendotTUI(App):
             return
         rev = self.agent.reversibility
         entries = rev.history()
-        target = next((e for e in entries if e.id == snap_id or e.id[-3:] == snap_id), None)
+        target = _resolve_action_id(entries, snap_id)
         if not target:
             self._write(f"no action {snap_id} (see /log)", "sys")
             return
@@ -871,7 +892,7 @@ class OpendotTUI(App):
             self._write("nothing to undo", "sys")
             return
         if snap_id:
-            target = next((e for e in entries if e.id == snap_id or e.id[-3:] == snap_id), None)
+            target = _resolve_action_id(entries, snap_id)
             if not target:
                 self._write(f"no action {snap_id} (see /log)", "sys")
                 return
