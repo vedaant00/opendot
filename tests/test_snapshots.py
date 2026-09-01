@@ -186,6 +186,30 @@ def test_restore_never_touches_skipped_paths(tmp_path):
     assert (wd / ".git" / "HEAD").read_text() == "precious"
 
 
+def test_restore_preserves_empty_dirs_inside_skipped_paths(tmp_path):
+    wd = _workspace(tmp_path)
+    snap = S.take_snapshot(wd)
+
+    nested = wd / ".git" / "refs" / "tags"
+    nested.mkdir(parents=True)
+
+    S.restore_snapshot(snap)
+
+    assert nested.is_dir()
+
+
+def test_restore_removes_new_empty_non_ignored_dirs(tmp_path):
+    wd = _workspace(tmp_path)
+    snap = S.take_snapshot(wd)
+
+    empty = wd / "build" / "cache"
+    empty.mkdir(parents=True)
+
+    S.restore_snapshot(snap)
+
+    assert not empty.exists()
+
+
 def test_snapshot_ids_are_monotonic(tmp_path):
     wd = _workspace(tmp_path)
     (wd / "f").write_text("a")
