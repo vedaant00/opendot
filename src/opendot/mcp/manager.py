@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import tempfile
 import threading
 from concurrent.futures import Future
 from dataclasses import dataclass
@@ -61,7 +63,34 @@ def save_mcp_config(servers: dict[str, dict]) -> None:
     """Write the full server map back to ~/.opendot/mcp.json."""
     path = _config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"mcpServers": servers}, indent=2), encoding="utf-8")
+    # A static config can carry Authorization headers, so it must never exist
+    # group/world-readable — not even briefly. Create a unique temp file that is
+    # 0600 *from the first byte* (mkstemp uses O_EXCL + mode 0600, so no collision
+    # and no world-readable window), then atomically rename it in. os.replace
+    # preserves the temp file's mode, so no follow-up chmod is needed (and none is
+    # wanted — an unguarded chmod can fail on permission-mapped mounts the creation
+    # mode already handles).
+    payload = json.dumps({"mcpServers": servers}, indent=2).encode("utf-8")
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp = Path(tmp_name)
+    replaced = False
+    try:
+        # If fdopen itself fails, the raw fd would leak — close it and re-raise.
+        try:
+            f = os.fdopen(fd, "wb")
+        except OSError:
+            os.close(fd)
+            raise
+        with f:
+            f.write(payload)
+        os.replace(tmp, path)
+        replaced = True
+    finally:
+        # Only clean up on failure. After a successful replace the temp name is
+        # freed, and a blind unlink could race and delete an unrelated file that
+        # took that name — so key the cleanup on `replaced`, not tmp.exists().
+        if not replaced:
+            tmp.unlink(missing_ok=True)
 
 
 def add_mcp_server(name: str, spec: dict) -> None:
