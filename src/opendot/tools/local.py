@@ -929,7 +929,8 @@ class Toolbox:
             ),
             Tool(
                 "run_shell",
-                "Run a shell command in the working directory (npm, git, build, mv, cp, etc.).",
+                "Run a shell command in the working directory (npm, git, build, cp, etc.; "
+                "prefer the move tool over `mv`).",
                 {
                     "type": "object",
                     "properties": {

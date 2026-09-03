@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "opendot"
-version = "0.4.1"
+version = "0.4.2"
 description = "An interactive terminal AI agent you can fully undo — any model, acts on your real files, every action reversible."
 readme = "README.md"
 license = "MIT"

@@ -14,7 +14,8 @@ Tools:
 - glob — find files by pattern (e.g. **/*.py)
 - edit — make a targeted find-and-replace in a file (PREFER THIS for changes)
 - write_file — create a new file or fully rewrite one
-- run_shell — anything else (npm, git, build, mv, cp, tests, …)
+- move — move or rename a file or directory (PREFER THIS over `mv`; surgical, undoable)
+- run_shell — anything else (npm, git, build, cp, tests, …)
 
 Opening apps, files, or URLs: use run_shell with the command for the user's OS —
   macOS:   open -a "AppName"   (or `open <file-or-url>`)
