@@ -162,11 +162,15 @@ class Reversibility:
             return None
         state = redo.read(self.project_id, len(entries))
         if state.undone >= len(entries):
-            return None  # already walked back past the first action
-        target = entries[-1 - state.undone]
-        if not target.snapshot_before:
-            # A no-snapshot action (OPENDOT_NO_SNAPSHOT) has nothing to restore.
             return None
+        target_idx = None
+        for i in range(len(entries) - 1 - state.undone, -1, -1):
+            if entries[i].snapshot_before:
+                target_idx = i
+                break
+        if target_idx is None:
+            return None
+        target = entries[target_idx]
 
         if state.undone == 0:
             # The state we're leaving is the head, and no later action snapshotted
@@ -175,7 +179,7 @@ class Reversibility:
             state.head_snapshot = snapshots.take_snapshot(self.workdir, self.rules).id
 
         self.last_changed_lockfiles = self.restore_to(target.snapshot_before)
-        state.undone += 1
+        state.undone = len(entries) - target_idx
         redo.write(self.project_id, state)
         return target
 
@@ -192,20 +196,24 @@ class Reversibility:
         if not state.can_redo:
             return None
 
-        # With `undone` actions reverted, the one to re-apply is the first of
-        # them. Its "after" state is the next action's before-snapshot, or the
-        # captured head when it is the newest action.
         target_index = len(entries) - state.undone
         target = entries[target_index]
-        after = (
-            state.head_snapshot
-            if target_index == len(entries) - 1
-            else entries[target_index + 1].snapshot_before
-        )
+
+        after = ""
+        next_undone = 0
+        for i in range(target_index + 1, len(entries)):
+            if entries[i].snapshot_before:
+                after = entries[i].snapshot_before
+                next_undone = len(entries) - i
+                break
+        if not after:
+            after = state.head_snapshot
+            next_undone = 0
+
         if not after:
             return None
 
         self.last_changed_lockfiles = self.restore_to(after)
-        state.undone -= 1
+        state.undone = next_undone
         redo.write(self.project_id, state)
         return target
