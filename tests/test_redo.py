@@ -308,3 +308,113 @@ def test_lockfile_warning_still_reported_through_redo(tmp_path):
 
     rev.redo()
     assert any("package-lock.json" in p for p in rev.last_changed_lockfiles)
+
+
+# ---- no-snapshot actions (issue #136) ----
+
+
+def test_trailing_no_snapshot_action_does_not_block_undo_and_redo(tmp_path):
+    """Issue #136: A trailing no-snapshot action (snapshot_before="") must be
+    skipped by undo_last() so earlier reversible actions can be undone and redone."""
+    rev, wd = _rev(tmp_path)
+    f = wd / "a.txt"
+    f.write_text("one")
+
+    _edit(rev, f, "two-two")
+    rev.before_action("shell", "shred secret.txt", snapshot=False)
+
+    assert rev.redo_available() == 0
+
+    undone = rev.undo_last()
+    assert undone is not None
+    assert undone.detail == str(f)
+    assert f.read_text() == "one"
+    assert rev.redo_available() == 2
+
+    assert rev.undo_last() is None
+
+    redone = rev.redo()
+    assert redone is not None
+    assert redone.detail == str(f)
+    assert f.read_text() == "two-two"
+    assert rev.redo_available() == 0
+    assert rev.redo() is None
+
+
+def test_interleaved_no_snapshot_action_undo_and_redo(tmp_path):
+    """A no-snapshot action between reversible actions is skipped during both
+    undo and redo while maintaining correct order and cursor bookkeeping."""
+    rev, wd = _rev(tmp_path)
+    f = wd / "a.txt"
+    f.write_text("one")
+
+    _edit(rev, f, "two-two")
+    rev.before_action("shell", "shred secret.txt", snapshot=False)
+    _edit(rev, f, "three-three-three")
+
+    assert rev.redo_available() == 0
+
+    # Undo C
+    undone_c = rev.undo_last()
+    assert undone_c is not None
+    assert undone_c.detail == str(f)
+    assert f.read_text() == "two-two"
+    assert rev.redo_available() == 1
+
+    # Undo A (skipping no-snapshot B)
+    undone_a = rev.undo_last()
+    assert undone_a is not None
+    assert undone_a.detail == str(f)
+    assert f.read_text() == "one"
+    assert rev.redo_available() == 3
+
+    assert rev.undo_last() is None
+
+    # Redo A (lands at snapshot before C, after B)
+    redone_a = rev.redo()
+    assert redone_a is not None
+    assert redone_a.detail == str(f)
+    assert f.read_text() == "two-two"
+    assert rev.redo_available() == 1
+
+    # Redo C (lands at head)
+    redone_c = rev.redo()
+    assert redone_c is not None
+    assert redone_c.detail == str(f)
+    assert f.read_text() == "three-three-three"
+    assert rev.redo_available() == 0
+    assert rev.redo() is None
+
+
+def test_multiple_trailing_no_snapshot_actions(tmp_path):
+    """Multiple trailing no-snapshot actions are all skipped when undoing."""
+    rev, wd = _rev(tmp_path)
+    f = wd / "a.txt"
+    f.write_text("one")
+
+    _edit(rev, f, "two-two")
+    rev.before_action("shell", "shred secret1.txt", snapshot=False)
+    rev.before_action("shell", "shred secret2.txt", snapshot=False)
+
+    undone = rev.undo_last()
+    assert undone is not None
+    assert undone.detail == str(f)
+    assert f.read_text() == "one"
+    assert rev.redo_available() == 3
+
+    redone = rev.redo()
+    assert redone is not None
+    assert redone.detail == str(f)
+    assert f.read_text() == "two-two"
+    assert rev.redo_available() == 0
+
+
+def test_all_no_snapshot_actions_undo_returns_none(tmp_path):
+    """When history contains only no-snapshot actions, undo returns None cleanly."""
+    rev, wd = _rev(tmp_path)
+    rev.before_action("shell", "shred secret1.txt", snapshot=False)
+    rev.before_action("shell", "shred secret2.txt", snapshot=False)
+
+    assert rev.undo_last() is None
+    assert rev.redo_available() == 0
+    assert rev.redo() is None
