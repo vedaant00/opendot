@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -76,6 +77,51 @@ def _assistant_msg(content: str, calls: list[dict[str, Any]]) -> dict[str, Any]:
             for c in calls
         ]
     return msg
+
+
+def _looks_like_tool_call(content: str, tools: list[dict[str, Any]] | None) -> bool:
+    """Detect whether assembled text looks like a plain-text tool call for a known tool."""
+    if not content or not tools:
+        return False
+
+    tool_names = {
+        t["function"]["name"]
+        for t in tools
+        if isinstance(t, dict)
+        and isinstance(t.get("function"), dict)
+        and isinstance(t["function"].get("name"), str)
+    }
+    if not tool_names:
+        return False
+
+    def _is_call(payload: Any) -> bool:
+        if isinstance(payload, dict):
+            return payload.get("name") in tool_names and "arguments" in payload
+        return False
+
+    # Check for <tool_call>{"name": ..., "arguments": ...}</tool_call>
+    for m in re.finditer(r"<tool_call>(.*?)</tool_call>", content, re.DOTALL):
+        text = m.group(1).strip()
+        try:
+            if _is_call(json.loads(text)):
+                return True
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+
+    # Check for bare JSON {"name": ..., "arguments": ...} (optionally in markdown code fence)
+    stripped = content.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if len(lines) >= 2 and lines[-1].strip() == "```":
+            stripped = "\n".join(lines[1:-1]).strip()
+
+    try:
+        if _is_call(json.loads(stripped)):
+            return True
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+
+    return False
 
 
 class Agent:
@@ -415,6 +461,10 @@ class Agent:
                     slot["name"] = tc.function.name
                 if tc.function and tc.function.arguments:
                     slot["args"] += tc.function.arguments
+
+        has_structured_calls = any(c.get("name") for c in tool_calls.values())
+        if not has_structured_calls and _looks_like_tool_call("".join(content_parts), tools):
+            raise _StreamUnsupported("stream emitted tool call as plain text")
 
         if usage_chunk is not None:
             self.usage.add_response(
