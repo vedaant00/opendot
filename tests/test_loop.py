@@ -13,10 +13,11 @@ import asyncio
 import types
 
 import litellm as real_litellm
+import pytest
 
 from opendot.agent.config import AgentConfig
 from opendot.agent.events import Event
-from opendot.agent.loop import Agent, _Assembled
+from opendot.agent.loop import Agent, _Assembled, _looks_like_tool_call, _StreamUnsupported
 
 
 class _Usage:
@@ -471,3 +472,479 @@ def test_normal_agent_run_passes_spawn_explorers(tmp_path, monkeypatch):
     a = Agent(AgentConfig(model="m", workdir=str(tmp_path)))
     tools = _run_and_capture_tools(a, monkeypatch)
     assert any(t["function"]["name"] == "spawn_explorers" for t in tools)
+
+
+# --- issue #140: plain-text tool-call detection and non-streaming fallback ---
+
+
+def test_looks_like_tool_call_helper():
+    tools = [
+        {"type": "function", "function": {"name": "read_file", "parameters": {}}},
+        {"type": "function", "function": {"name": "run_shell", "parameters": {}}},
+    ]
+
+    # Common <tool_call> formats
+    assert _looks_like_tool_call(
+        '<tool_call>{"name":"read_file","arguments":{"path":"foo.py"}}</tool_call>',
+        tools,
+    )
+    assert _looks_like_tool_call(
+        '\n<tool_call>\n{\n  "name": "read_file",\n  "arguments": {"path": "foo.py"}\n}\n</tool_call>\n',
+        tools,
+    )
+    assert _looks_like_tool_call(
+        'Prefix text before tag\n<tool_call>{"name":"read_file","arguments":{"path":"foo.py"}}</tool_call>',
+        tools,
+    )
+
+    # Bare JSON formats (including wrapped in markdown code fence)
+    assert _looks_like_tool_call(
+        '{"name": "read_file", "arguments": {"path": "foo.py"}}',
+        tools,
+    )
+    assert _looks_like_tool_call(
+        '```json\n{"name": "read_file", "arguments": {"path": "foo.py"}}\n```',
+        tools,
+    )
+
+    # Negative cases: must NOT match
+    # Malformed JSON in <tool_call> and bare text
+    assert not _looks_like_tool_call(
+        '<tool_call>{"name":"read_file","arguments":{</tool_call>',
+        tools,
+    )
+    assert not _looks_like_tool_call(
+        '{"name":"read_file","arguments":',
+        tools,
+    )
+    # JSON list of tool calls is not recognized
+    assert not _looks_like_tool_call(
+        '[{"name": "read_file", "arguments": {"path": "foo.py"}}]',
+        tools,
+    )
+    # Tool not in supplied tools
+    assert not _looks_like_tool_call(
+        '<tool_call>{"name":"unknown_tool","arguments":{}}</tool_call>',
+        tools,
+    )
+    assert not _looks_like_tool_call(
+        '{"name": "unknown_tool", "arguments": {}}',
+        tools,
+    )
+    # Ordinary text
+    assert not _looks_like_tool_call("Hello! How can I help you today?", tools)
+    # Ordinary JSON response
+    assert not _looks_like_tool_call('{"status": "ok", "items": [1, 2, 3]}', tools)
+    assert not _looks_like_tool_call('{"name": "Alice", "role": "admin"}', tools)
+    # JSON with matching name but not a tool call shape (no arguments)
+    assert not _looks_like_tool_call('{"name": "read_file", "description": "reads a file"}', tools)
+    # Empty inputs
+    assert not _looks_like_tool_call("", tools)
+    assert not _looks_like_tool_call('{"name": "read_file", "arguments": {}}', [])
+    assert not _looks_like_tool_call('{"name": "read_file", "arguments": {}}', None)
+
+
+class _BaseFakeLiteLLM(types.SimpleNamespace):
+    RateLimitError = real_litellm.RateLimitError
+    APIConnectionError = real_litellm.APIConnectionError
+    Timeout = real_litellm.Timeout
+    InternalServerError = real_litellm.InternalServerError
+    ServiceUnavailableError = real_litellm.ServiceUnavailableError
+    AuthenticationError = real_litellm.AuthenticationError
+    BadRequestError = real_litellm.BadRequestError
+
+
+def test_stream_turn_raises_stream_unsupported_on_plain_text_tool_call():
+    """_stream_turn directly raises _StreamUnsupported when plain text tool call is assembled."""
+
+    class _PlainTextLiteLLM(_BaseFakeLiteLLM):
+        async def acompletion(self, **kw):
+            async def gen():
+                yield _chunk_with_choices(
+                    '<tool_call>{"name":"read_file","arguments":{"path":"a.py"}}</tool_call>'
+                )
+
+            return gen()
+
+    a = _bare_agent()
+    tools = [{"type": "function", "function": {"name": "read_file", "parameters": {}}}]
+
+    async def run():
+        events = []
+        async for ev in a._stream_turn(_PlainTextLiteLLM(), tools):
+            events.append(ev)
+        return events
+
+    with pytest.raises(_StreamUnsupported):
+        asyncio.run(run())
+
+
+def test_plain_text_tool_call_leaks_no_text_event_before_fallback():
+    """A plain-text tool call streamed across several deltas must not surface any
+    text event to the caller: the payload is buffered and _StreamUnsupported is
+    raised before anything is yielded (so callers never display raw <tool_call>
+    JSON, and produced_output stays False for retry)."""
+
+    class _ChunkedPlainText(_BaseFakeLiteLLM):
+        async def acompletion(self, **kw):
+            async def gen():
+                # The tool-call payload arrives in pieces, as a real stream would.
+                for piece in (
+                    '<tool_call>{"name":"read_file",',
+                    '"arguments":{"path":"a.py"}}',
+                    "</tool_call>",
+                ):
+                    yield _chunk_with_choices(piece)
+
+            return gen()
+
+    a = _bare_agent()
+    tools = [{"type": "function", "function": {"name": "read_file", "parameters": {}}}]
+
+    async def run():
+        yielded = []
+        try:
+            async for ev in a._stream_turn(_ChunkedPlainText(), tools):
+                yielded.append(ev)
+        except _StreamUnsupported:
+            return yielded
+        raise AssertionError("expected _StreamUnsupported")
+
+    yielded = asyncio.run(run())
+    assert not any(ev.type == "text" for ev in yielded)  # nothing leaked
+
+
+def test_stream_tool_call_plain_text_falls_back_to_nonstream_and_executes(monkeypatch):
+    """Fake streaming LiteLLM returns a tool call as plain text, then the non-streaming
+    call returns a structured tool call. Verifies:
+      - streaming path detects it,
+      - fallback occurs,
+      - non-streaming is called,
+      - the tool actually executes,
+      - the tool call is not silently dropped.
+    """
+    tools = [{"type": "function", "function": {"name": "my_tool", "parameters": {}}}]
+    a = _bare_agent()
+    a.toolbox.specs = lambda: tools
+    tool_calls_executed = []
+    a.toolbox.call = lambda name, args: tool_calls_executed.append((name, args)) or "success_output"
+
+    class _FallbackLiteLLM(_BaseFakeLiteLLM):
+        def __init__(self):
+            super().__init__()
+            self.stream_calls = 0
+            self.nonstream_calls = 0
+
+        async def acompletion(self, **kw):
+            if kw.get("stream"):
+                self.stream_calls += 1
+                if self.stream_calls == 1:
+                    # Turn 1 streaming: returns tool call as plain text
+                    async def gen_plain_text():
+                        yield _chunk_with_choices(
+                            '<tool_call>{"name":"my_tool","arguments":{"file":"test.txt"}}</tool_call>'
+                        )
+
+                    return gen_plain_text()
+                else:
+                    # Turn 2 streaming: returns final answer
+                    async def gen_final():
+                        yield _chunk_with_choices("Done processing")
+
+                    return gen_final()
+            else:
+                # Fallback to non-streaming
+                self.nonstream_calls += 1
+                tc = types.SimpleNamespace(
+                    id="call_fallback_1",
+                    function=types.SimpleNamespace(name="my_tool", arguments='{"file":"test.txt"}'),
+                )
+                msg = types.SimpleNamespace(content="", tool_calls=[tc])
+                resp = types.SimpleNamespace(
+                    choices=[types.SimpleNamespace(message=msg)],
+                    usage=_Usage(),
+                )
+                return resp
+
+    fake = _FallbackLiteLLM()
+    events = _run_agent(a, fake, monkeypatch)
+
+    # 1. streaming path detects it and attempts turn 1 stream
+    assert fake.stream_calls >= 1
+    # 2. fallback occurs and non-streaming is called
+    assert fake.nonstream_calls == 1
+    # 3. the tool actually executes with correct args
+    assert tool_calls_executed == [("my_tool", {"file": "test.txt"})]
+    # 4. the tool call is not silently dropped: tool_start and tool_end events exist
+    assert any(ev.type == "tool_start" and ev.tool == "my_tool" for ev in events)
+    assert any(
+        ev.type == "tool_end" and ev.tool == "my_tool" and ev.result == "success_output"
+        for ev in events
+    )
+    assert any(ev.type == "final" for ev in events)
+    assert not any(ev.type == "error" for ev in events)
+
+
+def test_bare_json_tool_call_stream_falls_back_and_executes(monkeypatch):
+    """A bare JSON tool call payload during streaming also triggers fallback and executes."""
+    tools = [{"type": "function", "function": {"name": "my_tool", "parameters": {}}}]
+    a = _bare_agent()
+    a.toolbox.specs = lambda: tools
+    tool_calls_executed = []
+    a.toolbox.call = lambda name, args: tool_calls_executed.append((name, args)) or "ok"
+
+    class _BareJsonFallbackLiteLLM(_BaseFakeLiteLLM):
+        def __init__(self):
+            super().__init__()
+            self.stream_calls = 0
+            self.nonstream_calls = 0
+
+        async def acompletion(self, **kw):
+            if kw.get("stream"):
+                self.stream_calls += 1
+                if self.stream_calls == 1:
+
+                    async def gen_bare_json():
+                        yield _chunk_with_choices('{"name":"my_tool","arguments":{"count":42}}')
+
+                    return gen_bare_json()
+                else:
+
+                    async def gen_final():
+                        yield _chunk_with_choices("Finished")
+
+                    return gen_final()
+            else:
+                self.nonstream_calls += 1
+                tc = types.SimpleNamespace(
+                    id="call_fallback_2",
+                    function=types.SimpleNamespace(name="my_tool", arguments='{"count":42}'),
+                )
+                msg = types.SimpleNamespace(content="", tool_calls=[tc])
+                return types.SimpleNamespace(
+                    choices=[types.SimpleNamespace(message=msg)],
+                    usage=_Usage(),
+                )
+
+    fake = _BareJsonFallbackLiteLLM()
+    events = _run_agent(a, fake, monkeypatch)
+
+    assert fake.nonstream_calls == 1
+    assert tool_calls_executed == [("my_tool", {"count": 42})]
+    assert any(ev.type == "tool_start" and ev.tool == "my_tool" for ev in events)
+    assert any(ev.type == "final" for ev in events)
+
+
+def test_normal_structured_streaming_tool_calls_no_fallback(monkeypatch):
+    """Verify normal structured streaming tool_calls across chunk fragments
+    still works and does not trigger fallback."""
+    tools = [{"type": "function", "function": {"name": "my_tool", "parameters": {}}}]
+    a = _bare_agent()
+    a.toolbox.specs = lambda: tools
+    tool_calls_executed = []
+    a.toolbox.call = lambda name, args: tool_calls_executed.append((name, args)) or "ok"
+
+    class _StructuredStreamLiteLLM(_BaseFakeLiteLLM):
+        def __init__(self):
+            super().__init__()
+            self.stream_calls = 0
+            self.nonstream_calls = 0
+
+        async def acompletion(self, **kw):
+            if kw.get("stream"):
+                self.stream_calls += 1
+                if self.stream_calls == 1:
+
+                    async def gen_tc():
+                        # Chunk 1: delivers tool name and opening argument fragment
+                        tc1 = types.SimpleNamespace(
+                            index=0,
+                            id="call_normal_stream",
+                            function=types.SimpleNamespace(name="my_tool", arguments='{"key":'),
+                        )
+                        delta1 = types.SimpleNamespace(
+                            content=None, reasoning_content=None, tool_calls=[tc1]
+                        )
+                        yield types.SimpleNamespace(
+                            choices=[types.SimpleNamespace(delta=delta1)], usage=None
+                        )
+                        # Chunk 2: delivers closing argument fragment without repeated name
+                        tc2 = types.SimpleNamespace(
+                            index=0,
+                            id=None,
+                            function=types.SimpleNamespace(name=None, arguments='"value"}'),
+                        )
+                        delta2 = types.SimpleNamespace(
+                            content=None, reasoning_content=None, tool_calls=[tc2]
+                        )
+                        yield types.SimpleNamespace(
+                            choices=[types.SimpleNamespace(delta=delta2)], usage=None
+                        )
+
+                    return gen_tc()
+                else:
+
+                    async def gen_done():
+                        yield _chunk_with_choices("Completed")
+
+                    return gen_done()
+            else:
+                self.nonstream_calls += 1
+                raise AssertionError(
+                    "Non-streaming should NOT have been called for structured stream tool call"
+                )
+
+    fake = _StructuredStreamLiteLLM()
+    events = _run_agent(a, fake, monkeypatch)
+
+    assert fake.stream_calls == 2
+    assert fake.nonstream_calls == 0  # No fallback!
+    assert tool_calls_executed == [("my_tool", {"key": "value"})]
+    assert any(
+        ev.type == "tool_start" and ev.tool == "my_tool" and ev.args == {"key": "value"}
+        for ev in events
+    )
+    assert any(ev.type == "final" for ev in events)
+
+
+def test_ordinary_streamed_text_does_not_trigger_fallback(monkeypatch):
+    """Verify ordinary streamed text (including normal JSON answers) does not trigger fallback."""
+    tools = [{"type": "function", "function": {"name": "my_tool", "parameters": {}}}]
+    a = _bare_agent()
+    a.toolbox.specs = lambda: tools
+
+    class _TextStreamLiteLLM(_BaseFakeLiteLLM):
+        def __init__(self, text: str):
+            super().__init__()
+            self.text = text
+            self.stream_calls = 0
+            self.nonstream_calls = 0
+
+        async def acompletion(self, **kw):
+            if kw.get("stream"):
+                self.stream_calls += 1
+
+                async def gen():
+                    yield _chunk_with_choices(self.text)
+
+                return gen()
+            else:
+                self.nonstream_calls += 1
+                raise AssertionError("Non-streaming fallback should NOT have been triggered")
+
+    # Test ordinary plain text
+    fake1 = _TextStreamLiteLLM("Here is the answer to your question.")
+    events1 = _run_agent(a, fake1, monkeypatch)
+    assert fake1.stream_calls == 1
+    assert fake1.nonstream_calls == 0
+    assert any(ev.type == "final" for ev in events1)
+
+    # Test ordinary JSON response (not a tool call)
+    fake2 = _TextStreamLiteLLM('{"status": "ok", "items": ["a", "b"]}')
+    events2 = _run_agent(a, fake2, monkeypatch)
+    assert fake2.stream_calls == 1
+    assert fake2.nonstream_calls == 0
+    assert any(ev.type == "final" for ev in events2)
+
+    # Test JSON response for a tool not in tools
+    fake3 = _TextStreamLiteLLM('{"name": "other_tool", "arguments": {"x": 1}}')
+    events3 = _run_agent(a, fake3, monkeypatch)
+    assert fake3.stream_calls == 1
+    assert fake3.nonstream_calls == 0
+    assert any(ev.type == "final" for ev in events3)
+
+
+def test_malformed_streamed_tool_call_does_not_trigger_fallback(monkeypatch):
+    """When a stream emits a malformed <tool_call> payload for a known tool,
+    _StreamUnsupported is not raised through dispatch, non-streaming fallback is
+    not called, and the response completes normally."""
+    tools = [{"type": "function", "function": {"name": "my_tool", "parameters": {}}}]
+    a = _bare_agent()
+    a.toolbox.specs = lambda: tools
+
+    class _MalformedStreamLiteLLM(_BaseFakeLiteLLM):
+        def __init__(self):
+            super().__init__()
+            self.stream_calls = 0
+            self.nonstream_calls = 0
+
+        async def acompletion(self, **kw):
+            if kw.get("stream"):
+                self.stream_calls += 1
+
+                async def gen():
+                    yield _chunk_with_choices(
+                        '<tool_call>{"name":"my_tool","arguments":{</tool_call>'
+                    )
+
+                return gen()
+            else:
+                self.nonstream_calls += 1
+                raise AssertionError("Non-streaming fallback should NOT have been triggered")
+
+    fake = _MalformedStreamLiteLLM()
+    events = _run_agent(a, fake, monkeypatch)
+
+    assert fake.stream_calls == 1
+    assert fake.nonstream_calls == 0
+    assert any(ev.type == "final" for ev in events)
+
+
+def test_usage_not_recorded_for_failed_streaming_attempt(monkeypatch):
+    """Verify usage is not recorded for the failed streaming attempt before fallback.
+    Only the successful non-streaming call's usage is recorded."""
+    tools = [{"type": "function", "function": {"name": "my_tool", "parameters": {}}}]
+    a = _bare_agent()
+    a.toolbox.specs = lambda: tools
+    a.toolbox.call = lambda name, args: "ok"
+
+    usage_recorded = []
+    a.usage.add_response = lambda resp, *args, **kw: usage_recorded.append(resp)
+
+    class _UsageTrackingLiteLLM(_BaseFakeLiteLLM):
+        def __init__(self):
+            super().__init__()
+            self.stream_calls = 0
+            self.nonstream_calls = 0
+
+        async def acompletion(self, **kw):
+            if kw.get("stream"):
+                self.stream_calls += 1
+                if self.stream_calls == 1:
+                    # Turn 1: streaming yields usage chunk AND plain-text tool call
+                    async def gen_tool_with_usage():
+                        yield _chunk_no_choices(with_usage=True)
+                        yield _chunk_with_choices(
+                            '<tool_call>{"name":"my_tool","arguments":{}}</tool_call>'
+                        )
+
+                    return gen_tool_with_usage()
+                else:
+                    # Turn 2: final stream call
+                    async def gen_final():
+                        yield _chunk_with_choices("Done", with_usage=True)
+
+                    return gen_final()
+            else:
+                # Non-streaming fallback for Turn 1
+                self.nonstream_calls += 1
+                tc = types.SimpleNamespace(
+                    id="call_fallback",
+                    function=types.SimpleNamespace(name="my_tool", arguments="{}"),
+                )
+                msg = types.SimpleNamespace(content="", tool_calls=[tc])
+                resp = types.SimpleNamespace(
+                    choices=[types.SimpleNamespace(message=msg)],
+                    usage=_Usage(),
+                )
+                return resp
+
+    fake = _UsageTrackingLiteLLM()
+    _run_agent(a, fake, monkeypatch)
+
+    assert fake.nonstream_calls == 1
+    # Usage was recorded for:
+    # 1. The non-streaming fallback of Turn 1
+    # 2. The successful streaming of Turn 2
+    # The failed streaming attempt of Turn 1 was NOT recorded!
+    assert len(usage_recorded) == 2
