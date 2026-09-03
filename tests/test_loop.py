@@ -560,7 +560,9 @@ def test_stream_turn_raises_stream_unsupported_on_plain_text_tool_call():
     class _PlainTextLiteLLM(_BaseFakeLiteLLM):
         async def acompletion(self, **kw):
             async def gen():
-                yield _chunk_with_choices('<tool_call>{"name":"read_file","arguments":{"path":"a.py"}}</tool_call>')
+                yield _chunk_with_choices(
+                    '<tool_call>{"name":"read_file","arguments":{"path":"a.py"}}</tool_call>'
+                )
 
             return gen()
 
@@ -666,11 +668,13 @@ def test_bare_json_tool_call_stream_falls_back_and_executes(monkeypatch):
             if kw.get("stream"):
                 self.stream_calls += 1
                 if self.stream_calls == 1:
+
                     async def gen_bare_json():
                         yield _chunk_with_choices('{"name":"my_tool","arguments":{"count":42}}')
 
                     return gen_bare_json()
                 else:
+
                     async def gen_final():
                         yield _chunk_with_choices("Finished")
 
@@ -715,6 +719,7 @@ def test_normal_structured_streaming_tool_calls_no_fallback(monkeypatch):
             if kw.get("stream"):
                 self.stream_calls += 1
                 if self.stream_calls == 1:
+
                     async def gen_tc():
                         # Chunk 1: delivers tool name and opening argument fragment
                         tc1 = types.SimpleNamespace(
@@ -722,7 +727,9 @@ def test_normal_structured_streaming_tool_calls_no_fallback(monkeypatch):
                             id="call_normal_stream",
                             function=types.SimpleNamespace(name="my_tool", arguments='{"key":'),
                         )
-                        delta1 = types.SimpleNamespace(content=None, reasoning_content=None, tool_calls=[tc1])
+                        delta1 = types.SimpleNamespace(
+                            content=None, reasoning_content=None, tool_calls=[tc1]
+                        )
                         yield types.SimpleNamespace(
                             choices=[types.SimpleNamespace(delta=delta1)], usage=None
                         )
@@ -732,13 +739,16 @@ def test_normal_structured_streaming_tool_calls_no_fallback(monkeypatch):
                             id=None,
                             function=types.SimpleNamespace(name=None, arguments='"value"}'),
                         )
-                        delta2 = types.SimpleNamespace(content=None, reasoning_content=None, tool_calls=[tc2])
+                        delta2 = types.SimpleNamespace(
+                            content=None, reasoning_content=None, tool_calls=[tc2]
+                        )
                         yield types.SimpleNamespace(
                             choices=[types.SimpleNamespace(delta=delta2)], usage=None
                         )
 
                     return gen_tc()
                 else:
+
                     async def gen_done():
                         yield _chunk_with_choices("Completed")
 
@@ -828,7 +838,9 @@ def test_malformed_streamed_tool_call_does_not_trigger_fallback(monkeypatch):
                 self.stream_calls += 1
 
                 async def gen():
-                    yield _chunk_with_choices('<tool_call>{"name":"my_tool","arguments":{</tool_call>')
+                    yield _chunk_with_choices(
+                        '<tool_call>{"name":"my_tool","arguments":{</tool_call>'
+                    )
 
                 return gen()
             else:
