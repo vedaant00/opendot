@@ -79,6 +79,26 @@ def _assistant_msg(content: str, calls: list[dict[str, Any]]) -> dict[str, Any]:
     return msg
 
 
+def _could_be_tool_call_prefix(content: str) -> bool:
+    """Whether accumulated stream text might still turn into a plain-text tool call.
+
+    A plain-text tool call always begins (once leading whitespace is stripped)
+    with ``<tool_call>``, a ```` ``` ```` code fence, or a bare JSON object ``{``.
+    While the buffered content is still consistent with one of those openings we
+    hold the text back rather than yielding it, so a tool-call payload is never
+    surfaced to the caller before the non-streaming fallback runs. Anything else
+    is ordinary prose and can stream through immediately.
+    """
+    s = content.lstrip()
+    if not s:
+        return True  # nothing yet; could still become a tool call
+    # A prefix of any opening marker keeps us buffering (e.g. "<", "<tool", "``").
+    for marker in ("<tool_call>", "```", "{"):
+        if s.startswith(marker) or marker.startswith(s):
+            return True
+    return False
+
+
 def _looks_like_tool_call(content: str, tools: list[dict[str, Any]] | None) -> bool:
     """Detect whether assembled text looks like a plain-text tool call for a known tool."""
     if not content or not tools:
@@ -429,6 +449,11 @@ class Agent:
             api_base=self.config.api_base,  # None => provider default
         )
         content_parts: list[str] = []
+        # While the assembled text could still be a plain-text tool call we buffer
+        # it here instead of yielding, so a <tool_call>… payload is never shown to
+        # the caller before we fall back to the non-streaming path. Once the text
+        # is clearly prose we flush the buffer and stream the rest through live.
+        held = True
         tool_calls: dict[int, dict[str, Any]] = {}
         # Usage may arrive on its own final chunk (no choices) or attached to a
         # content chunk — capture whichever arrives first, but don't record it
@@ -452,7 +477,13 @@ class Agent:
                 yield Event("thinking", text=reasoning)
             if getattr(delta, "content", None):
                 content_parts.append(delta.content)
-                yield Event("text", text=delta.content)
+                if held and not _could_be_tool_call_prefix("".join(content_parts)):
+                    # Clearly prose, not a tool call: flush everything buffered so
+                    # far as one text event, then stream subsequent deltas live.
+                    held = False
+                    yield Event("text", text="".join(content_parts))
+                elif not held:
+                    yield Event("text", text=delta.content)
             for tc in getattr(delta, "tool_calls", None) or []:
                 slot = tool_calls.setdefault(tc.index, {"id": "", "name": "", "args": ""})
                 if tc.id:
@@ -464,7 +495,15 @@ class Agent:
 
         has_structured_calls = any(c.get("name") for c in tool_calls.values())
         if not has_structured_calls and _looks_like_tool_call("".join(content_parts), tools):
+            # Raise before flushing the buffer, so nothing is yielded and the
+            # caller's produced_output stays False (the fallback can still retry).
             raise _StreamUnsupported("stream emitted tool call as plain text")
+
+        if held and content_parts:
+            # Buffered content that turned out not to be a tool call (e.g. a short
+            # reply that merely started with "{"): flush it now.
+            held = False
+            yield Event("text", text="".join(content_parts))
 
         if usage_chunk is not None:
             self.usage.add_response(

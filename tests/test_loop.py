@@ -579,6 +579,41 @@ def test_stream_turn_raises_stream_unsupported_on_plain_text_tool_call():
         asyncio.run(run())
 
 
+def test_plain_text_tool_call_leaks_no_text_event_before_fallback():
+    """A plain-text tool call streamed across several deltas must not surface any
+    text event to the caller: the payload is buffered and _StreamUnsupported is
+    raised before anything is yielded (so callers never display raw <tool_call>
+    JSON, and produced_output stays False for retry)."""
+
+    class _ChunkedPlainText(_BaseFakeLiteLLM):
+        async def acompletion(self, **kw):
+            async def gen():
+                # The tool-call payload arrives in pieces, as a real stream would.
+                for piece in (
+                    '<tool_call>{"name":"read_file",',
+                    '"arguments":{"path":"a.py"}}',
+                    "</tool_call>",
+                ):
+                    yield _chunk_with_choices(piece)
+
+            return gen()
+
+    a = _bare_agent()
+    tools = [{"type": "function", "function": {"name": "read_file", "parameters": {}}}]
+
+    async def run():
+        yielded = []
+        try:
+            async for ev in a._stream_turn(_ChunkedPlainText(), tools):
+                yielded.append(ev)
+        except _StreamUnsupported:
+            return yielded
+        raise AssertionError("expected _StreamUnsupported")
+
+    yielded = asyncio.run(run())
+    assert not any(ev.type == "text" for ev in yielded)  # nothing leaked
+
+
 def test_stream_tool_call_plain_text_falls_back_to_nonstream_and_executes(monkeypatch):
     """Fake streaming LiteLLM returns a tool call as plain text, then the non-streaming
     call returns a structured tool call. Verifies:
