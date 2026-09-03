@@ -893,7 +893,7 @@ def test_usage_not_recorded_for_failed_streaming_attempt(monkeypatch):
                 return resp
 
     fake = _UsageTrackingLiteLLM()
-    events = _run_agent(a, fake, monkeypatch)
+    _run_agent(a, fake, monkeypatch)
 
     assert fake.nonstream_calls == 1
     # Usage was recorded for:
