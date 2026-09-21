@@ -832,6 +832,23 @@ def main() -> None:
         # container runtime — never silently runs directly.
         from opendot import sandbox
 
+        # --api-base names a server the *container* must reach. With networking
+        # off it can reach nothing, and a loopback address means the container
+        # itself rather than the host, so warn instead of failing obscurely.
+        _sbx_api_base = getattr(args, "api_base", None)
+        if _sbx_api_base:
+            if not args.sandbox_net:
+                console.print(
+                    "[yellow]sandbox: --api-base is set but the container has no network "
+                    "(--network none). Add --sandbox-net, or drop --api-base.[/yellow]"
+                )
+            elif any(h in _sbx_api_base for h in ("//localhost", "//127.0.0.1", "//[::1]")):
+                console.print(
+                    "[yellow]sandbox: --api-base points at loopback, which inside the "
+                    "container is the container itself, not your host. Use an address the "
+                    "container can reach (e.g. host.docker.internal).[/yellow]"
+                )
+
         try:
             result = sandbox.run_sandboxed(
                 workdir,
@@ -840,6 +857,12 @@ def main() -> None:
                 image=args.sandbox_image,
                 network=args.sandbox_net,
                 env_keys=_forwarded_env_keys(args.model),
+                # Forward policy/budget flags: a hard-blocked --deny pattern must
+                # not become auto-approved just because the run is sandboxed.
+                deny=list(getattr(args, "deny", []) or []),
+                usd=getattr(args, "usd", None),
+                tokens=getattr(args, "tokens", None),
+                api_base=getattr(args, "api_base", None),
             )
         except sandbox.SandboxError as exc:
             console.print(f"[bold red]sandbox:[/bold red] {exc}")

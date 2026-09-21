@@ -205,6 +205,10 @@ def build_run_command(
     *,
     network: bool,
     env_keys: list[str],
+    deny: list[str] | None = None,
+    usd: float | None = None,
+    tokens: int | None = None,
+    api_base: str | None = None,
 ) -> list[str]:
     """Build the ``docker/podman run`` argv that runs opendot one-shot inside the
     container against the mounted sandbox workspace.
@@ -220,6 +224,17 @@ def build_run_command(
     for key in env_keys:
         argv += ["-e", key]  # forward the value from the host env by name
     argv += [image, "opendot", "-p", prompt, "--model", model, "--yes"]
+    # Policy and budget flags must survive the trip into the container: a
+    # hard-blocked pattern must not become auto-approved just because the run
+    # is sandboxed.
+    for pat in deny or []:
+        argv += ["--deny", pat]
+    if usd is not None:
+        argv += ["--usd", str(usd)]
+    if tokens is not None:
+        argv += ["--tokens", str(tokens)]
+    if api_base:
+        argv += ["--api-base", api_base]
     return argv
 
 
@@ -231,6 +246,10 @@ def run_sandboxed(
     image: str,
     network: bool = False,
     env_keys: list[str] | None = None,
+    deny: list[str] | None = None,
+    usd: float | None = None,
+    tokens: int | None = None,
+    api_base: str | None = None,
     runner=subprocess.run,
 ) -> dict:
     """Run one opendot turn inside a container against a copy of ``workdir``, then
@@ -257,7 +276,17 @@ def run_sandboxed(
             raise SandboxError(f"failed to stage workspace copy: {exc}") from exc
 
         argv = build_run_command(
-            runtime, image, sandbox_dir, prompt, model, network=network, env_keys=env_keys
+            runtime,
+            image,
+            sandbox_dir,
+            prompt,
+            model,
+            network=network,
+            env_keys=env_keys,
+            deny=deny,
+            usd=usd,
+            tokens=tokens,
+            api_base=api_base,
         )
         proc = runner(argv)
         # A runner that returns nothing usable means the container never ran; treat
