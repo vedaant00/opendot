@@ -798,3 +798,45 @@ def test_write_outside_workspace_via_plain_path_raises(tmp_path):
     tb, wd, _ = _tb(tmp_path)
     with pytest.raises(OSError):
         tb._write_plain_verified(tmp_path / "outside.txt", b"x")
+
+
+def test_grep_context_windows_do_not_duplicate_lines(tmp_path):
+    # Regression (#165): overlapping context windows re-emitted shared lines.
+    tb, wd, _ = _tb(tmp_path)
+    (wd / "f.txt").write_text("aaa\nbbb\naaa\nccc\naaa\n")
+    out = tb.call("grep", {"pattern": "aaa", "path": str(wd / "f.txt"), "context": 2})
+    body_lines = [ln for ln in out.splitlines() if ln.startswith("f.txt:")]
+    assert (
+        len(body_lines) == 5
+    )  # the file has 5 lines; 3 overlapping windows must still emit each once
+    import re
+
+    assert [re.match(r"f\.txt:(\d+)", ln).group(1) for ln in body_lines] == [
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+    ]
+    # A line already printed as context that later matches must be upgraded to
+    # the colon marker, not left as a context dash (Copilot review on the PR).
+    assert body_lines[0] == "f.txt:1:aaa"  # first hit emitted directly
+    assert body_lines[1] == "f.txt:2-bbb"  # pure context stays dashed
+    assert body_lines[2] == "f.txt:3:aaa"  # line 3 was line 1's context, then matched
+    assert body_lines[4] == "f.txt:5:aaa"  # same upgrade for the last hit
+
+
+def test_grep_max_matches_zero_returns_no_matches(tmp_path):
+    # Regression (#165): cap was checked after appending, so max_matches=0
+    # returned one match labelled "(capped at 0)".
+    tb, wd, _ = _tb(tmp_path)
+    assert tb.call("grep", {"pattern": "TODO", "max_matches": 0}) == "no matches"
+
+
+def test_grep_max_matches_still_includes_first(tmp_path):
+    tb, wd, _ = _tb(tmp_path)
+    (wd / "f.txt").write_text("hit one\nhit two\n")
+    out = tb.call("grep", {"pattern": "hit", "path": str(wd / "f.txt"), "max_matches": 1})
+    assert "hit one" in out
+    assert "hit two" not in out
+    assert "(capped at 1)" in out
