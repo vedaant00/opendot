@@ -57,18 +57,20 @@ async def run_explorers(
 
     async def one(lane: int, task: str) -> None:
         await q.put(Event("explorer_start", text=task, lane=lane))
-        agent = Agent(
-            AgentConfig(
-                model=model,
-                workdir=workdir,
-                system_prompt=_EXPLORER_SYSTEM,
-                api_base=api_base,
-                temperature=temperature,
-            ),
-            read_only=True,
-        )
         answer_parts: list[str] = []
         try:
+            # Constructed inside the try: Agent.__init__ does I/O and can raise,
+            # and that must become this lane's finding, not kill the fan-out.
+            agent = Agent(
+                AgentConfig(
+                    model=model,
+                    workdir=workdir,
+                    system_prompt=_EXPLORER_SYSTEM,
+                    api_base=api_base,
+                    temperature=temperature,
+                ),
+                read_only=True,
+            )
             async for ev in agent.run(task):
                 if ev.type == "tool_start":
                     await q.put(Event("explorer_step", text=f"{ev.tool}", lane=lane))
@@ -83,16 +85,25 @@ async def run_explorers(
         await q.put(Event("explorer_done", text=summary, lane=lane))
 
     async def run_all() -> None:
-        await asyncio.gather(*(one(i, t) for i, t in enumerate(tasks)))
-        await q.put(None)  # sentinel
+        try:
+            await asyncio.gather(
+                *(one(i, t) for i, t in enumerate(tasks)), return_exceptions=True
+            )
+        finally:
+            # Always release the consumer, even if a lane dies unexpectedly.
+            await q.put(None)
 
     runner = asyncio.create_task(run_all())
-    while True:
-        ev = await q.get()
-        if ev is None:
-            break
-        yield ev
-    await runner
+    try:
+        while True:
+            ev = await q.get()
+            if ev is None:
+                break
+            yield ev
+    finally:
+        # Interrupted turns must stop the lanes, or they keep spending on the model.
+        runner.cancel()
+        await asyncio.gather(runner, return_exceptions=True)
 
     # Attach the merged findings as the tool's textual result via a final event.
     merged = "\n\n".join(
