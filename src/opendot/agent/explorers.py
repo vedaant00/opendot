@@ -86,9 +86,7 @@ async def run_explorers(
 
     async def run_all() -> None:
         try:
-            await asyncio.gather(
-                *(one(i, t) for i, t in enumerate(tasks)), return_exceptions=True
-            )
+            await asyncio.gather(*(one(i, t) for i, t in enumerate(tasks)), return_exceptions=True)
         finally:
             # Always release the consumer, even if a lane dies unexpectedly.
             await q.put(None)

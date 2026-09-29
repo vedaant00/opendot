@@ -94,9 +94,7 @@ async def test_lane_construction_failure_does_not_deadlock(tmp_path, monkeypatch
     async def collect():
         return [
             ev
-            async for ev in explorers.run_explorers(
-                ["a", "b"], model="fake", workdir=str(tmp_path)
-            )
+            async for ev in explorers.run_explorers(["a", "b"], model="fake", workdir=str(tmp_path))
         ]
 
     # wait_for turns a deadlock into a test failure instead of a hung suite
@@ -125,10 +123,7 @@ async def test_lane_run_failure_is_reported_as_finding(tmp_path, monkeypatch):
     monkeypatch.setattr("opendot.agent.loop.Agent", FlakyAgent)
 
     events = [
-        ev
-        async for ev in explorers.run_explorers(
-            ["a"], model="fake", workdir=str(tmp_path)
-        )
+        ev async for ev in explorers.run_explorers(["a"], model="fake", workdir=str(tmp_path))
     ]
 
     done = [e for e in events if e.type == "explorer_done"]
