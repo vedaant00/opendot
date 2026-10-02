@@ -85,20 +85,24 @@ async def run_explorers(
         findings[lane] = summary
         await q.put(Event("explorer_done", text=summary, lane=lane))
 
-    async def run_all() -> None:
+    async def run_all() -> list:
         try:
-            await asyncio.gather(*(one(i, t) for i, t in enumerate(tasks)), return_exceptions=True)
+            return await asyncio.gather(
+                *(one(i, t) for i, t in enumerate(tasks)), return_exceptions=True
+            )
         finally:
             # Always release the consumer, even if a lane dies unexpectedly.
             q.put_nowait(None)  # sentinel
 
     runner = asyncio.create_task(run_all())
+    completed_normally = False
     try:
         while True:
             ev = await q.get()
             if ev is None:
                 break
             yield ev
+        completed_normally = True
     finally:
         # The consumer left early (aclose()/GeneratorExit/cancellation): stop
         # the lanes instead of leaking them into detached model calls.
@@ -106,7 +110,18 @@ async def run_explorers(
         # the GeneratorExit/cancellation propagating through this generator.
         if not runner.done():
             runner.cancel()
-        await asyncio.gather(runner, return_exceptions=True)
+        lane_results = await asyncio.gather(runner, return_exceptions=True)
+        if completed_normally:
+            # A lane's uncaught CancelledError (or other BaseException) was
+            # converted to a gather result by return_exceptions=True; re-raise
+            # it here so a lane-originated cancellation is not silently
+            # reported as successful completion with "(no findings)".
+            results = lane_results[0] if lane_results else []
+            if isinstance(results, BaseException):
+                raise results
+            for r in results or []:
+                if isinstance(r, BaseException):
+                    raise r
 
     # Attach the merged findings as the tool's textual result via a final event.
     merged = "\n\n".join(

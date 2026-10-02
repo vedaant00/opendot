@@ -172,6 +172,43 @@ async def test_explorer_early_close_leaves_no_running_lanes(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_explorer_lane_cancellation_propagates_not_silent(tmp_path, monkeypatch):
+    """A cancellation originating *inside* a lane must propagate instead of
+    being discarded by gather(..., return_exceptions=True) and silently
+    reported as successful completion with '(no findings)'."""
+    from opendot.agent import explorers
+    from opendot.agent.events import Event
+
+    class SelfCancellingAgent:
+        def __init__(self, *a, **k):
+            pass
+
+        async def run(self, task):
+            if task == "cancel-me":
+                yield Event("text", text="partial-")
+                raise asyncio.CancelledError("lane cancelled itself")
+            yield Event("text", text=f"found stuff for {task}")
+
+    monkeypatch.setattr("opendot.agent.loop.Agent", SelfCancellingAgent)
+
+    events = []
+    with pytest.raises(asyncio.CancelledError):
+        async for ev in explorers.run_explorers(
+            ["cancel-me", "fine"], model="fake", workdir=str(tmp_path)
+        ):
+            events.append(ev)
+
+    # No successful completion: no merged tool_end, and the cancelling lane
+    # never reported explorer_done. The healthy lane still did.
+    assert not [e for e in events if e.type == "tool_end"]
+    dones = [e for e in events if e.type == "explorer_done"]
+    assert len(dones) == 1 and "found stuff for fine" in dones[0].text
+    await asyncio.sleep(0.2)
+
+    assert _explorer_task_names() == []
+
+
+@pytest.mark.asyncio
 async def test_explorer_cancellation_propagates_and_stops_lanes(tmp_path, monkeypatch):
     """Cancelling the consumer must surface CancelledError (not an ordinary
     error event) and still leave no running lanes behind."""
