@@ -57,18 +57,21 @@ async def run_explorers(
 
     async def one(lane: int, task: str) -> None:
         await q.put(Event("explorer_start", text=task, lane=lane))
-        agent = Agent(
-            AgentConfig(
-                model=model,
-                workdir=workdir,
-                system_prompt=_EXPLORER_SYSTEM,
-                api_base=api_base,
-                temperature=temperature,
-            ),
-            read_only=True,
-        )
         answer_parts: list[str] = []
         try:
+            # Construction does real I/O (rules, ledger) and can raise; it is
+            # inside the boundary so one bad lane reports a finding instead of
+            # killing the whole fan-out before the sentinel is queued.
+            agent = Agent(
+                AgentConfig(
+                    model=model,
+                    workdir=workdir,
+                    system_prompt=_EXPLORER_SYSTEM,
+                    api_base=api_base,
+                    temperature=temperature,
+                ),
+                read_only=True,
+            )
             async for ev in agent.run(task):
                 if ev.type == "tool_start":
                     await q.put(Event("explorer_step", text=f"{ev.tool}", lane=lane))
@@ -82,17 +85,43 @@ async def run_explorers(
         findings[lane] = summary
         await q.put(Event("explorer_done", text=summary, lane=lane))
 
-    async def run_all() -> None:
-        await asyncio.gather(*(one(i, t) for i, t in enumerate(tasks)))
-        await q.put(None)  # sentinel
+    async def run_all() -> list:
+        try:
+            return await asyncio.gather(
+                *(one(i, t) for i, t in enumerate(tasks)), return_exceptions=True
+            )
+        finally:
+            # Always release the consumer, even if a lane dies unexpectedly.
+            q.put_nowait(None)  # sentinel
 
     runner = asyncio.create_task(run_all())
-    while True:
-        ev = await q.get()
-        if ev is None:
-            break
-        yield ev
-    await runner
+    completed_normally = False
+    try:
+        while True:
+            ev = await q.get()
+            if ev is None:
+                break
+            yield ev
+        completed_normally = True
+    finally:
+        # The consumer left early (aclose()/GeneratorExit/cancellation): stop
+        # the lanes instead of leaking them into detached model calls.
+        # gather(return_exceptions=True) reaps the runner without swallowing
+        # the GeneratorExit/cancellation propagating through this generator.
+        if not runner.done():
+            runner.cancel()
+        lane_results = await asyncio.gather(runner, return_exceptions=True)
+        if completed_normally:
+            # A lane's uncaught CancelledError (or other BaseException) was
+            # converted to a gather result by return_exceptions=True; re-raise
+            # it here so a lane-originated cancellation is not silently
+            # reported as successful completion with "(no findings)".
+            results = lane_results[0] if lane_results else []
+            if isinstance(results, BaseException):
+                raise results
+            for r in results or []:
+                if isinstance(r, BaseException):
+                    raise r
 
     # Attach the merged findings as the tool's textual result via a final event.
     merged = "\n\n".join(
