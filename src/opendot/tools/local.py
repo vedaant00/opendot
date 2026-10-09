@@ -320,6 +320,22 @@ class Toolbox:
         except ValueError:
             return True
 
+    def _is_lexically_outside_workspace(self, p: Path) -> bool:
+        """True if ``p`` is outside the working directory by its *written* path.
+
+        Unlike ``_is_outside_workspace`` this does NOT follow symlinks (it only
+        collapses ``..``), so a path that looks in-workspace but runs through a
+        symlink pointing elsewhere is still classified as inside and therefore
+        goes through ``_safe_write_within_workspace``, which refuses to follow
+        the link. Genuinely outside paths keep the confirm-gated branch."""
+        norm = Path(os.path.abspath(str(p)))
+        wd = Path(os.path.abspath(str(self.workdir)))
+        try:
+            norm.relative_to(wd)
+            return False
+        except ValueError:
+            return True
+
     def _safe_write_within_workspace(self, p: Path, content: str) -> None:
         """Write ``content`` to ``p`` (inside the workspace) with the strongest
         open-time containment the OS offers, so a symlinked / swapped path
@@ -610,7 +626,7 @@ class Toolbox:
             # A write outside the working dir isn't covered by the snapshot, so it
             # can't be undone. Confirm first and record it honestly as irreversible,
             # exactly like an escaping shell command. Never claim a lying undo.
-            outside = self._is_outside_workspace(p)
+            outside = self._is_lexically_outside_workspace(p)
             if outside and not self._confirm(
                 f"This writes outside the workspace and can't be undone:\n  {p}\nWrite it?"
             ):
@@ -625,7 +641,8 @@ class Toolbox:
             try:
                 if outside:
                     # Already confirmed + recorded irreversible above; a plain
-                    # write is fine (containment doesn't apply outside the workspace).
+                    # write is fine (containment doesn't apply to paths lexically outside
+                    # the workspace).
                     p.parent.mkdir(parents=True, exist_ok=True)
                     p.write_text(content, encoding="utf-8")
                 else:
