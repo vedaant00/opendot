@@ -762,34 +762,66 @@ def test_openat2_refuses_symlink_escape_when_supported(tmp_path):
 
 
 def test_write_refuses_intermediate_symlink_escape(tmp_path):
-    """An intermediate path component that is a symlink pointing outside the
-    workspace must not be followed — the write stays inside, the symlinked dir is
-    replaced by a real one. Closes the intermediate-symlink race on every tier
-    (not just Linux openat2). (#130)"""
+    """Via the public write_file: an intermediate symlinked dir pointing outside
+    the workspace must not be followed — the write stays inside and the symlinked
+    dir is replaced by a real one. (#130, #164)"""
     tb, wd, _ = _tb(tmp_path)
     outside_dir = tmp_path / "attacker_dir"
     outside_dir.mkdir()
     (wd / "sub").symlink_to(outside_dir)  # wd/sub -> outside
 
-    tb._safe_write_within_workspace(wd / "sub" / "data.txt", "NEW")
+    out = tb.call("write_file", {"path": "sub/data.txt", "content": "NEW"})
 
+    assert not out.startswith("error")
     assert not (outside_dir / "data.txt").exists()  # never escaped
     assert not (wd / "sub").is_symlink()  # symlinked component replaced by real dir
     assert (wd / "sub" / "data.txt").read_text() == "NEW"
 
 
-def test_plain_verified_refuses_intermediate_symlink(tmp_path):
-    """The dir_fd-less fallback (Windows path) also refuses an intermediate
-    symlink escape, not just the POSIX fd-walk."""
+def test_plain_verified_refuses_intermediate_symlink(tmp_path, monkeypatch):
+    """Same scenario through write_file, forced down the dir_fd-less fallback
+    (the Windows path) by disabling the openat2 and fd-walk tiers. (#164)"""
+    monkeypatch.setattr("opendot.tools.local._write_via_openat2", lambda *a, **k: False)
     tb, wd, _ = _tb(tmp_path)
+    monkeypatch.setattr(tb, "_write_via_fd_walk", lambda p, data: False)
     outside_dir = tmp_path / "attacker_dir2"
     outside_dir.mkdir()
     (wd / "sub").symlink_to(outside_dir)
 
-    tb._write_plain_verified(wd / "sub" / "data.txt", b"NEW")
+    out = tb.call("write_file", {"path": "sub/data.txt", "content": "NEW"})
 
+    assert not out.startswith("error")
     assert not (outside_dir / "data.txt").exists()
     assert (wd / "sub" / "data.txt").read_text() == "NEW"
+
+
+def test_write_file_neutralizes_in_workspace_symlink_file(tmp_path):
+    """A symlinked *file* inside the workspace is replaced, not followed. (#164)"""
+    tb, wd, _ = _tb(tmp_path)
+    secret = tmp_path / "outside_secret"
+    secret.write_text("ORIGINAL", encoding="utf-8")
+    (wd / "notes.txt").symlink_to(secret)
+
+    tb.call("write_file", {"path": "notes.txt", "content": "NEW"})
+
+    assert secret.read_text() == "ORIGINAL"
+    assert not (wd / "notes.txt").is_symlink()
+    assert (wd / "notes.txt").read_text() == "NEW"
+
+
+def test_write_file_normal_in_workspace_write_unaffected(tmp_path):
+    tb, wd, _ = _tb(tmp_path)
+    out = tb.call("write_file", {"path": "src/new.py", "content": "q = 1\n"})
+    assert out.startswith("created")
+    assert (wd / "src" / "new.py").read_text() == "q = 1\n"
+
+
+def test_write_file_truly_outside_path_still_writes_after_confirm(tmp_path):
+    """Paths outside the workspace lexically keep the confirm-gated branch."""
+    tb, wd, _ = _tb(tmp_path)  # confirm=lambda p: True
+    target = tmp_path / "elsewhere.txt"
+    tb.call("write_file", {"path": str(target), "content": "hi"})
+    assert target.read_text() == "hi"
 
 
 def test_write_outside_workspace_via_plain_path_raises(tmp_path):
