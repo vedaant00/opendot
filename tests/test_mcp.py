@@ -184,6 +184,22 @@ def test_mcp_add_cli_parses_flags_vs_command(tmp_path, monkeypatch):
     assert cfg["s"] == {"command": "cmd", "args": ["-y", "pkg"], "env": {"K": "v"}}
 
 
+def test_mcp_add_cli_without_command_or_url_fails(tmp_path, monkeypatch, capsys):
+    """`opendot mcp add NAME` with neither `-- cmd...` nor `--url` must fail
+    loudly (nonzero exit) instead of printing an error and exiting 0."""
+    import sys
+
+    from opendot import cli
+    from opendot.mcp.manager import load_mcp_config
+
+    monkeypatch.setattr(sys, "argv", ["opendot", "mcp", "add", "s"])
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main()
+    assert exc_info.value.code == 2
+    assert "launch command" in capsys.readouterr().out
+    assert load_mcp_config() == {}
+
+
 def test_mcp_add_remote_with_header(tmp_path, monkeypatch):
     """`opendot mcp add NAME --url <u> --header 'Authorization=Bearer x'` stores
     the header so authenticated remote servers (e.g. Supabase PAT) can connect."""
