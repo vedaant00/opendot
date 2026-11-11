@@ -389,7 +389,9 @@ def _cmd_mcp(args) -> None:
                 console.print(
                     "[red]provide a launch command after `--`, or use --url for a remote server[/red]"
                 )
-                return
+                # A usage error, not a successful no-op: exit nonzero like
+                # argparse (and the --sandbox guard below) so scripts notice.
+                raise SystemExit(2)
             spec = {"command": cmd[0]}
             if len(cmd) > 1:
                 spec["args"] = cmd[1:]
